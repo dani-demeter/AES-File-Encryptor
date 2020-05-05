@@ -1,4 +1,3 @@
-importScripts('./aesjs.js');
 console.log("HI. WORKER HERE");
 
 onmessage = function(e) {
@@ -7,57 +6,148 @@ onmessage = function(e) {
     var reader = new FileReader();
     reader.onload = function() {
         if (getExtension(file.name) != "dcrypt") {
-            var res = encryptFile(file, this.result, e.data[1]);
-            console.log("worker finished encrypting");
-            postMessage(res);
+            encryptFile(file, this.result, e.data[1])
+                .then((res) => {
+                    // console.log(res);
+                    res.status = "success";
+                    // console.log("worker finished encrypting");
+                    postMessage(res);
+                })
+                .catch(err => {
+                    postMessage(err);
+                });
         } else {
-            var res = decryptFile(file, this.result, e.data[1]);
-            console.log("worker finished decrypting");
-            postMessage(res);
+            decryptFile(file, this.result, e.data[1])
+                .then((res) => {
+                    // console.log(res);
+                    res.status = "success";
+                    // console.log("worker finished decrypting");
+                    postMessage(res);
+                })
+                .catch(err => {
+                    err.status = "error";
+                    postMessage(err);
+                });
         }
     }
     reader.readAsArrayBuffer(file);
 }
 
-function encryptFile(file, bytes, hashedKey) {
-    console.log(file, bytes, hashedKey);
+async function encryptFile(file, bytes, keyAsBytes) {
     var filename = file.name;
     var type = file.type;
-    var textBytes = aesjs.utils.utf8.toBytes(filename + ";" + type + ";");
-    var arrayBuffer = bytes;
-    var array = concatTypedArrays(textBytes, new Uint8Array(arrayBuffer));
-    console.log(array);
+    return importSecretKey(keyAsBytes)
+        .then((cryptoKey) => {
+            const salt = crypto.getRandomValues(new Uint8Array(32));
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            return crypto.subtle.deriveKey({
+                    name: 'PBKDF2',
+                    salt,
+                    iterations: 250000,
+                    hash: {
+                        name: 'SHA-256'
+                    }
+                }, cryptoKey, {
+                    name: 'AES-GCM',
+                    length: 256
+                }, false, ['encrypt'])
+                .then((aesKey) => {
+                    let enc = new TextEncoder();
+                    var textBytes = enc.encode(filename + ";" + type + ";");
+                    var array = concatTypedArrays(textBytes, new Uint8Array(bytes));
 
-    var aesCtr = new aesjs.ModeOfOperation.ctr(hashedKey);
-    var encryptedBytes = aesCtr.encrypt(array);
-
-    return {
-        bytesToSave: encryptedBytes,
-        fileNameToSave: filename.substring(0, filename.lastIndexOf(".")) + ".dcrypt",
-        fileSaveType: ""
-    }
+                    return crypto.subtle.encrypt({
+                        name: 'AES-GCM',
+                        iv
+                    }, aesKey, array);
+                })
+                .then((encryptedContent) => {
+                    const encryptedBytes = new Uint8Array(encryptedContent);
+                    // console.log(encryptedBytes);
+                    const encryptedPackage = concatTypedArrays(concatTypedArrays(salt, iv), encryptedBytes)
+                    // console.log(encryptedPackage);
+                    return {
+                        // bytesToSave: Base64.fromByteArray(encryptedPackage),
+                        bytesToSave: encryptedPackage,
+                        fileNameToSave: filename.substring(0, filename.lastIndexOf(".")) + ".dcrypt",
+                        fileSaveType: "text/plain"
+                    };
+                });
+        })
 }
 
-function decryptFile(file, bytes, hashedKey) {
-    var aesCtr = new aesjs.ModeOfOperation.ctr(hashedKey);
-    var arrayBuffer = bytes;
-    var array = new Uint8Array(arrayBuffer);
-    var decryptedBytes = aesCtr.decrypt(array);
+async function decryptFile(file, bytes, keyAsBytes) {
+    const salt = bytes.slice(0, 32);
+    const iv = bytes.slice(32, 44);
+    const encryptedData = bytes.slice(44);
+    // console.log(salt, iv, encryptedData, bytes);
+    return importSecretKey(keyAsBytes)
+        .then((cryptoKey) => {
+            return crypto.subtle.deriveKey({
+                    name: 'PBKDF2',
+                    salt,
+                    iterations: 250000,
+                    hash: {
+                        name: 'SHA-256'
+                    }
+                }, cryptoKey, {
+                    name: 'AES-GCM',
+                    length: 256
+                }, false, ['decrypt'])
+                .then((aesKey) => {
+                    return crypto.subtle.decrypt({
+                        name: 'AES-GCM',
+                        iv
+                    }, aesKey, encryptedData);
+                })
+                .then((decryptedContent) => {
+                    const decryptedBytes = new Uint8Array(decryptedContent);
+                    var s = convertEnoughBytes(decryptedBytes, ";", 2);
 
-    var decryptedText = aesjs.utils.utf8.fromBytes(decryptedBytes);
-    var secIndex = getNthOccurrence(decryptedText, ";", 2);
-    var textUntilSecondSemicolon = decryptedText.substring(0, secIndex).split(";");
-    var filen = textUntilSecondSemicolon[0];
-    var typ = textUntilSecondSemicolon[1];
-    decryptedBytes = decryptedBytes.slice(secIndex + 1);
-    var bytes = new Uint8Array(decryptedBytes);
-    return {
-        bytesToSave: bytes,
-        fileNameToSave: filen,
-        fileSaveType: typ
-    }
+                    // console.log(s);
+                    return {
+                        bytesToSave: decryptedBytes.slice(getNthOccurrence(s, ";", 2)+1),
+                        fileNameToSave: s.substring(0, getNthOccurrence(s, ";", 1)),
+                        fileSaveType: s.substring(getNthOccurrence(s, ";", 1)+1, getNthOccurrence(s, ";", 2)),
+                    };
+                });
+        });
 }
 
+function convertEnoughBytes(bytes, pat, n) {
+    var end = 10;
+    var cond = true;
+    var res;
+    var decoder = new TextDecoder("utf-8");
+    while (cond && end < bytes.byteLength) {
+        var partStr = decoder.decode(bytes.slice(0, end));
+        if (getNthOccurrence(partStr, pat, n) != -1) {
+            res = partStr;
+            cond = false;
+        } else {
+            if (end == bytes.byteLength - 1) {
+                res = "";
+                cond = false;
+            } else {
+                end += 10;
+                if (end >= bytes.byteLength) {
+                    end = bytes.byteLength - 1;
+                }
+            }
+        }
+    }
+    return res;
+}
+
+function importSecretKey(rawKey) {
+    return crypto.subtle.importKey(
+        "raw",
+        rawKey,
+        "PBKDF2",
+        false,
+        ["deriveKey"]
+    );
+}
 
 function getExtension(name) {
     return name.substring(name.lastIndexOf(".") + 1);
@@ -72,7 +162,6 @@ function getNthOccurrence(str, pat, n) {
     }
     return i;
 }
-
 
 function concatTypedArrays(a, b) { // a, b TypedArray of same type
     var c = new(a.constructor)(a.length + b.length);

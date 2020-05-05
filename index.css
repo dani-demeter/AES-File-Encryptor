@@ -14,10 +14,13 @@ body{
 }
 
 #inputDiv p{
+    font-family: 'Raleway', sans-serif;
     color: #F5F0F6;
+    margin: 0;
     font-size: 3em;
     position: absolute;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
+    cursor: default;
 }
